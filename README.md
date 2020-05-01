@@ -1,9 +1,13 @@
 # HTPC Download Box
 
-Sonarr / Radarr / Jackett / NZBGet / Deluge / OpenVPN / Plex
+Sonarr / Radarr / Jackett / NZBGet / Deluge / OpenVPN / Plex / Ombi
 
 TV shows and movies download, sort, with the desired quality and subtitles, behind a VPN (optional), ready to watch, in a beautiful media player.
 All automated.
+
+This is a fork of [https://github.com/sebgl/htpc-download-box](https://github.com/sebgl/htpc-download-box).     
+
+This build includes [Ombi](https://hub.docker.com/r/linuxserver/ombi) and [Watchtower](https://hub.docker.com/r/v2tec/watchtower/).  
 
 ## Table of Contents
 
@@ -161,7 +165,7 @@ The stack is not really plug-and-play. You'll see that manual human configuratio
 
 Optional steps described below that you may wish to skip:
 
-- Using a VPN server for Deluge incoming/outgoing traffic.
+- Using a VPN server for Deluge and Jackett incoming/outgoing traffic.
 - Using newsgroups (Usenet): you can skip NZBGet installation and all related Sonarr/Radarr indexers configuration if you wish to use bittorrent only.
 
 ### Install docker and docker-compose
@@ -180,7 +184,7 @@ Also install docker-compose (see the [official instructions](https://docs.docker
 
 This tutorial will guide you along the full process of making your own docker-compose file and configuring every app within it, however, to prevent errors or to reduce your typing, you can also use the general-purpose docker-compose file provided in this repository.
 
-1. First, `git clone https://github.com/sebgl/htpc-download-box` into a directory. This is where you will run the full setup from (note: this isn't the same as your media directory)
+1. First, `git clone https://github.com/btafoya/htpc-download-box` into a directory. This is where you will run the full setup from (note: this isn't the same as your media directory)
 2. Rename the `.env.example` file included in the repo to `.env`.
 3. Continue this guide, and the docker-compose file snippets you see are already ready for you to use. You'll still need to manually configure your `.env` file and other manual configurations.
 
@@ -207,6 +211,12 @@ PUID=1000
 PGID=1000
 # The directory where data and configuration will be stored.
 ROOT=/media/my_user/storage/homemedia
+# For watchtower
+SMTP_FROM={smtp-from-email]
+SMTP_SERVER={smtp-server-hostname}
+SMTP_PORT={smtp-server-port]
+SMTP_USER={smtp-server-username}
+SMTP_PASS={smtp-server-password}
 ```
 
 Things to notice:
@@ -222,12 +232,10 @@ Things to notice:
 We'll use deluge Docker image from linuxserver, which runs both the deluge daemon and web UI in a single container.
 
 ```yaml
-version: "3"
-services:
   deluge:
     container_name: deluge
-    image: linuxserver/deluge:latest
-    restart: always
+    image: btafoya/docker-deluge:latest
+    restart: unless-stopped
     network_mode: service:vpn # run on the vpn network
     environment:
       - PUID=${PUID} # default user id, defined in .env
@@ -236,6 +244,8 @@ services:
     volumes:
       - ${ROOT}/downloads:/downloads # downloads folder
       - ${ROOT}/config/deluge:/config # config files
+    depends_on:
+      - vpn
 ```
 
 Things to notice:
@@ -350,33 +360,24 @@ Then, rename `<country>.ovpn` to `vpn.conf`
 Put it in the docker-compose file, and make deluge use the vpn container network:
 
 ```yaml
-vpn:
-  container_name: vpn
-  image: dperson/openvpn-client:latest
-  cap_add:
-    - net_admin # required to modify network interfaces
-  restart: unless-stopped
-  volumes:
-    - /dev/net:/dev/net:z # tun device
-    - ${ROOT}/config/vpn:/vpn # OpenVPN configuration
-  security_opt:
-    - label:disable
-  ports:
-    - 8112:8112 # port for deluge web UI to be reachable from local network
-  command: "-r 192.168.1.0/24" # route local network traffic
-
-deluge:
-  container_name: deluge
-  image: linuxserver/deluge:latest
-  restart: always
-  network_mode: service:vpn # run on the vpn network
-  environment:
-    - PUID=${PUID} # default user id, defined in .env
-    - PGID=${PGID} # default group id, defined in .env
-    - TZ=${TZ} # timezone, defined in .env
-  volumes:
-    - ${ROOT}/downloads:/downloads # downloads folder
-    - ${ROOT}/config/deluge:/config # config files
+  vpn:
+    container_name: vpn
+    image: dperson/openvpn-client:latest
+    cap_add:
+      - net_admin # required to modify network interfaces
+    restart: unless-stopped
+    volumes:
+      - /dev/net:/dev/net:z # tun device
+      - ${ROOT}/config/vpn:/vpn # OpenVPN configuration
+    security_opt:
+      - label:disable
+    ports:
+      - 8112:8112 # port for deluge web UI to be reachable from local network
+      - 9117:9117 # port for jackett web UI to be reachable from local network
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    command: '-f "" -r 192.168.1.0/24' # enable firewall and route local network traffic
 ```
 
 Notice how deluge is now using the vpn container network, with deluge web UI port exposed on the vpn container for local network access.
@@ -395,19 +396,21 @@ Get the torrent magnet link there, put it in Deluge, wait a bit, then you should
 No surprise: let's use linuxserver.io container !
 
 ```yaml
-jackett:
-  container_name: jackett
-  image: linuxserver/jackett:latest
-  restart: unless-stopped
-  network_mode: host
-  environment:
-    - PUID=${PUID} # default user id, defined in .env
-    - PGID=${PGID} # default group id, defined in .env
-    - TZ=${TZ} # timezone, defined in .env
-  volumes:
-    - /etc/localtime:/etc/localtime:ro
-    - ${ROOT}/downloads/torrent-blackhole:/downloads # place where to put .torrent files for manual download
-    - ${ROOT}/config/jackett:/config # config files
+  jackett:
+    container_name: jackett
+    image: btafoya/docker-jackett:latest
+    restart: unless-stopped
+    network_mode: service:vpn
+    environment:
+      - PUID=${PUID} # default user id, defined in .env
+      - PGID=${PGID} # default group id, defined in .env
+      - TZ=${TZ} # timezone, defined in .env
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${ROOT}/downloads/torrent-blackhole:/downloads # place where to put .torrent files for manual download
+      - ${ROOT}/config/jackett:/config # config files
+    depends_on:
+      - vpn
 ```
 
 Nothing particular in this configuration, it's pretty similar to other linuxserver.io images.
@@ -550,11 +553,15 @@ Let's go:
       - PUID=${PUID} # default user id, defined in .env
       - PGID=${PGID} # default group id, defined in .env
       - TZ=${TZ} # timezone, defined in .env
-     volumes:
+    volumes:
       - /etc/localtime:/etc/localtime:ro
       - ${ROOT}/config/sonarr:/config # config files
       - ${ROOT}/complete/tv:/tv # tv shows folder
       - ${ROOT}/downloads:/downloads # download folder
+    depends_on:
+      - jackett
+      - deluge
+      - nzbget
 ```
 
 `docker-compose up -d`
@@ -640,11 +647,15 @@ Radarr is _very_ similar to Sonarr. You won't be surprised by this configuration
       - PUID=${PUID} # default user id, defined in .env
       - PGID=${PGID} # default group id, defined in .env
       - TZ=${TZ} # timezone, defined in .env
-     volumes:
+    volumes:
       - /etc/localtime:/etc/localtime:ro
       - ${ROOT}/config/radarr:/config # config files
       - ${ROOT}/complete/movies:/movies # movies folder
       - ${ROOT}/downloads:/downloads # download folder
+    depends_on:
+      - jackett
+      - deluge
+      - nzbget
 ```
 
 #### Configuration
@@ -779,15 +790,23 @@ It's a beautiful and well-thinked app. Easy to get a look at upcoming tv shows r
 
 The free version does not allow you to add new shows. Consider switching to the paid version (6\$) and support the developer.
 
+## Additions
+
+[Ombi](http://www.ombi.io/): Web UI to give your shared Plex instance users the ability to request new content.  
+
+[Muximux](https://hub.docker.com/r/linuxserver/muximux) is a lightweight portal to view & manage your HTPC apps without having to run anything more than a PHP enabled webserver. With Muximux you don't need to keep multiple tabs open, or bookmark the URL to all of your apps.
+
+[Watchtower](v2tec/watchtower) Watches your containers and automatically restarts them whenever their image is refreshed. 
+
+[NZBHydra2](linuxserver/hydra2): meta search for NZB indexers (like [Jackett](https://github.com/Jackett/Jackett) does for torrents). Could simplify and centralise nzb indexers configuration at a single place.  
+
 ## Going Further
 
 Some stuff worth looking at that I do not use at the moment:
 
-- [NZBHydra](https://github.com/theotherp/nzbhydra): meta search for NZB indexers (like [Jackett](https://github.com/Jackett/Jackett) does for torrents). Could simplify and centralise nzb indexers configuration at a single place.
 - [Organizr](https://github.com/causefx/Organizr): Embed all these services in a single webpage with tab-based navigation
 - [Plex sharing features](https://www.plex.tv/features/#feat-modal)
 - [Headphones](https://github.com/rembo10/headphones): Automated music download. Like Sonarr but for music albums. I've been using it for a while, but it did not give me satisfying results. I also tend to rely entirely on a Spotify premium account to manage my music collection now.
 - [Mylar](https://github.com/evilhero/mylar): like Sonarr, but for comic books.
-- [Ombi](http://www.ombi.io/): Web UI to give your shared Plex instance users the ability to request new content
 - [PlexPy](https://github.com/JonnyWong16/plexpy): Monitoring interface for Plex. Useful is you share your Plex server to multiple users.
 - Radarr lists automated downloads, to fetch best movies automatically. [Rotten Tomatoes certified movies](https://www.rottentomatoes.com/browse/cf-in-theaters/) would be a nice list to parse and get automatically.

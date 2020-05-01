@@ -1,4 +1,4 @@
-version: "3.4"
+version: '2.4'
 services:
   vpn:
     container_name: vpn
@@ -13,11 +13,15 @@ services:
       - label:disable
     ports:
       - 8112:8112 # port for deluge web UI to be reachable from local network
+      - 9117:9117 # port for jackett web UI to be reachable from local network
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
     command: '-f "" -r 192.168.1.0/24' # enable firewall and route local network traffic
 
   deluge:
     container_name: deluge
-    image: linuxserver/deluge:latest
+    image: btafoya/docker-deluge:latest
     restart: unless-stopped
     network_mode: service:vpn # run on the vpn network
     environment:
@@ -27,12 +31,14 @@ services:
     volumes:
       - ${ROOT}/downloads:/downloads # downloads folder
       - ${ROOT}/config/deluge:/config # config files
+    depends_on:
+      - vpn
 
   jackett:
     container_name: jackett
-    image: linuxserver/jackett:latest
+    image: btafoya/docker-jackett:latest
     restart: unless-stopped
-    network_mode: host
+    network_mode: service:vpn
     environment:
       - PUID=${PUID} # default user id, defined in .env
       - PGID=${PGID} # default group id, defined in .env
@@ -41,6 +47,8 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - ${ROOT}/downloads/torrent-blackhole:/downloads # place where to put .torrent files for manual download
       - ${ROOT}/config/jackett:/config # config files
+    depends_on:
+      - vpn
 
   nzbget:
     container_name: nzbget
@@ -54,6 +62,55 @@ services:
     volumes:
       - ${ROOT}/downloads:/downloads # download folder
       - ${ROOT}/config/nzbget:/config # config files
+
+  watchtower:
+    image: v2tec/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    environment:
+        - TZ=${TZ}
+        - PUID=${PUID}
+        - PGID=${PGID}
+        - WATCHTOWER_NOTIFICATIONS=email
+        - WATCHTOWER_NOTIFICATION_EMAIL_FROM=${SMTP_FROM}
+        - WATCHTOWER_NOTIFICATION_EMAIL_TO=${SMTP_FROM}
+        - WATCHTOWER_NOTIFICATION_EMAIL_SERVER=${SMTP_SERVER}
+        - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT=${SMTP_PORT}
+        - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER=${SMTP_USER}
+        - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD=${SMTP_PASS}
+    volumes:
+        - '/var/run/docker.sock:/var/run/docker.sock'
+        - '/etc/ssl/certs:/etc/ssl/certs'
+    command: --schedule @midnight --cleanup
+    labels:
+        - 'traefik.enable=false'
+
+  muximux:
+    image: linuxserver/muximux
+    container_name: muximux
+    environment:
+      - PUID=${PUID} # default user id, defined in .env
+      - PGID=${PGID} # default group id, defined in .env
+      - TZ=${TZ} # timezone, defined in .env
+    volumes:
+      - ${ROOT}/config/muximux:/config
+    ports:
+      - 80:80
+    restart: unless-stopped
+
+  hydra2:
+    image: linuxserver/hydra2
+    container_name: hydra2
+    environment:
+      - PUID=${PUID} # default user id, defined in .env
+      - PGID=${PGID} # default group id, defined in .env
+      - TZ=${TZ} # timezone, defined in .env
+    volumes:
+      - ${ROOT}/config/hydra:/config
+      - ${ROOT}/downloads:/downloads
+    ports:
+      - 5076:5076
+    restart: unless-stopped
 
   sonarr:
     container_name: sonarr
@@ -69,6 +126,10 @@ services:
       - ${ROOT}/config/sonarr:/config # config files
       - ${ROOT}/complete/tv:/tv # tv shows folder
       - ${ROOT}/downloads:/downloads # download folder
+    depends_on:
+      - jackett
+      - deluge
+      - nzbget
 
   radarr:
     container_name: radarr
@@ -84,6 +145,10 @@ services:
       - ${ROOT}/config/radarr:/config # config files
       - ${ROOT}/complete/movies:/movies # movies folder
       - ${ROOT}/downloads:/downloads # download folder
+    depends_on:
+      - jackett
+      - deluge
+      - nzbget
 
   plex-server:
     container_name: plex-server
@@ -113,3 +178,18 @@ services:
       - ${ROOT}/complete/tv:/tv # tv shows folder
     ports:
       - 6767:6767
+
+  ombi:
+    image: linuxserver/ombi
+    container_name: ombi
+    environment:
+      - PUID=${PGID}
+      - PGID=${PGID}
+      - TZ=${TV}
+      - BASE_URL=/ombi #optional
+    volumes:
+      - /path/to/appdata/config:/config
+    ports:
+      - 3579:3579
+    restart: unless-stopped
+    network_mode: host
